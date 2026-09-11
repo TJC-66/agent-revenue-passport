@@ -1,0 +1,32 @@
+# JavaScript dependencies and build output
+node_modules/
+web/node_modules/
+web/.next/
+web/.vinext/
+web/dist/
+web/.wrangler/
+web/outputs/
+web/work/
+
+# Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+!web/.env.example
+*.pem
+*.key
+
+# Local index databases. The small, portable JSON snapshots are committed.
+data/*.sqlite
+data/*.sqlite-*
+
+# Operating-system and editor files
+.DS_Store
+*.log
+

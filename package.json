@@ -1,0 +1,15 @@
+{
+  "name": "agent-income-verifier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "node src/cli.js",
+    "sync:antseed": "node src/sync-antseed-ledger.js",
+    "sync:antseed-integrity": "node src/sync-antseed-integrity.js",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "genlayer": "^0.39.2"
+  }
+}
