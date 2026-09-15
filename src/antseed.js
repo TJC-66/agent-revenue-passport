@@ -157,13 +157,20 @@ async function readBlockscoutLogs(wallet, fromBlock, toBlock, deps = {}) {
 export async function readAntseedPaymentEvents(wallet, activity, deps = {}) {
   if (!wallet || !activity?.lastSettledBlock) return null;
   if (!deps.rpcCall && (deps.eventSource ?? process.env.ANTSEED_EVENT_SOURCE ?? "blockscout") === "blockscout") {
-    const fromBlock = activity.firstSettledBlock;
+    // When a durable ledger cursor is available, ask Blockscout only for the
+    // contiguous range after that cursor. This preserves complete coverage
+    // without turning a few days of Base blocks into hundreds of sequential
+    // public-RPC calls during an interactive verification.
+    const fromBlock = Math.max(
+      activity.firstSettledBlock ?? 0,
+      Math.min(activity.lastSettledBlock, Number(deps.resumeFromBlock ?? activity.firstSettledBlock)),
+    );
     const toBlock = activity.lastSettledBlock;
     try {
       const rawLogs = await readBlockscoutLogs(wallet, fromBlock, toBlock, deps);
       return summarizePaymentEvents(rawLogs, fromBlock, toBlock, [], {
         source: "base-blockscout",
-        completeHistory: true,
+        completeHistory: fromBlock === activity.firstSettledBlock,
         successfulRanges: null,
       }, deps);
     } catch (error) {
