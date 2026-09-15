@@ -1,10 +1,10 @@
-# Agent Revenue Passport
+# ProofRabbit（证明兔）
 
-Agent Revenue Passport turns buyer-signed onchain settlements into a portable revenue-integrity profile for AI agents. It separates genuine platform settlements from ordinary wallet transfers, calculates stable evidence metrics, and sends a compact evidence bundle to GenLayer for a final fraud judgment.
+ProofRabbit turns buyer-signed onchain settlements into an explainable revenue and fraud-risk report for AI agents. It separates genuine platform settlements from ordinary wallet transfers, calculates stable evidence metrics, and sends a compact evidence bundle to GenLayer for a final fraud judgment.
 
 Live product: https://agent-revenue-passport.manshiguang124.chatgpt.site
 
-![Agent Revenue Passport landing page](./docs/screenshots/01-landing-final.jpg)
+![ProofRabbit landing page](./docs/screenshots/01-landing-final.jpg)
 
 ## What works today
 
@@ -18,17 +18,26 @@ The current live flow supports AntSeed on Base:
 - Optionally checks major payer wallets for direct transfers and common funding through Blockscout.
 - Produces deterministic income credibility, fraud-payment risk, and evidence sufficiency metrics.
 - Submits the compact evidence to a deployed GenLayer Intelligent Contract.
+- Runs verification as one gated flow: evidence refresh, wallet approval, GenLayer consensus, then one complete result with the natural-language verdict first.
 - Renders the final result in plain Chinese or English.
+- Lets an eligible agent wallet claim a non-transferable, 30-day revenue credential from the current contract.
+- Provides a public, read-only `/proof/<wallet>` page that verifies the credential directly from GenLayer.
 
 A buyer signature proves that a payment occurred. It does not, by itself, prove that every payer is independent. Wallet-link signals are therefore treated as evidence clues rather than a claim that two wallets certainly have the same owner.
 
 ## What GenLayer does
 
-The local indexer and deterministic policy calculate the numerical metrics once. The deployed v2 contract does not ask validators to create a second set of scores.
+The local indexer and deterministic policy calculate the numerical metrics once. The contract does not ask validators to create a second set of scores.
 
-`contracts/income_credibility_judge.py` asks GenLayer validators one bounded question: do the submitted facts support a finding of fraudulent revenue activity? The contract stores the agreed verdict together with reason codes and cited wallets. User-facing wording stays in the website, so the Chinese and English explanation can improve without redeploying the contract.
+`contracts/income_credibility_judge.py` asks the leader to turn the exact evidence into a case-specific Chinese and English explanation. Other validators independently assess the same evidence and vote on the decision-bearing risk profile and primary risk; they do not invent another score or require independently written prose to match word-for-word. The accepted explanation, reason codes, cited wallets, scores, and exact evidence are stored together onchain.
 
-The contract rejects malformed evidence, unsupported policy versions, conflicting credibility/risk metrics, oversized payloads, and duplicate report IDs. Evidence strings are treated as untrusted data rather than instructions.
+The v7 contract rejects malformed evidence, unsupported policy versions, conflicting credibility/risk metrics, oversized payloads, duplicate report IDs, and report IDs that do not match the SHA-256 digest of the submitted evidence. It normalizes the public analysis to evidence-backed decision types and uses an evidence-derived fallback if a model response is malformed, so one formatting failure does not invalidate the entire transaction. It preserves the exact judged evidence for public audit. Evidence strings are treated as untrusted data rather than instructions.
+
+## ProofRabbit revenue credential
+
+The v7 contract adds a wallet-bound credential rather than a transferable NFT or a screenshot badge. Only the wallet named in an eligible judgment can claim it. A credential expires after 30 days, can be revoked by its wallet, and is automatically superseded when that wallet claims a newer credential. The public verification page reads the current status from the GenLayer contract and shows the report ID, evidence digest, scores, issuer contract, issue time, and expiry.
+
+Eligibility currently requires a `no_fraud_signals` risk profile, income credibility of at least 70, fraud risk no higher than 30, and evidence sufficiency of at least 70. These thresholds are part of the contract source and cannot be changed silently after deployment.
 
 ## Data freshness
 
@@ -50,7 +59,7 @@ A production version should run those full refreshes on a schedule and persist t
 
 The public verification flow currently supports AntSeed on Base. The repository also contains a locally tested GH Bounty adapter for Solana records, but it is not yet connected to the public UI or final assessment. GH Bounty is the next ecosystem integration.
 
-Later versions can add explicit adapters for OKX AI and other agent marketplaces. Agent Revenue Passport does not claim to automatically identify every AI-agent payment on every chain without platform or settlement evidence.
+Later versions can add explicit adapters for OKX AI and other agent marketplaces. ProofRabbit does not claim to automatically identify every AI-agent payment on every chain without platform or settlement evidence.
 
 ## Run locally
 
@@ -89,12 +98,15 @@ Never commit an RPC URL containing an API key.
 ## GenLayer deployment
 
 - Contract: `contracts/income_credibility_judge.py`
-- Policy version: `agent-income-v2`
-- Bradbury contract address: `0x0a85C6Dd93051d11775f4F8709d372e4f821a698`
-- Explorer: `https://explorer-bradbury.genlayer.com/address/0x0a85C6Dd93051d11775f4F8709d372e4f821a698`
-- Deployment transaction: `0x4c86150c0a772e818fee99e91044a282d84be6514df4240499f8342eb11f9e43`
+- Current source policy: `proofrabbit-revenue-v7`
+- Credential standard: `proofrabbit-revenue-attestation-v3`
+- Studio Next contract address: `0x79ab7ac7a17920354547A0B0b1d8f955F76278CC`
+- Successful Studio Next deployment transaction: `0x36a61596567852d5ed693bdcadfb85961fa1e34704d4b12b733049b1452cb506`
+- Required network: Studio Next, chain ID `61997`, RPC `https://studio-next.genlayer.com/api`
+- Official hackathon explorer: `https://explorer-studio-dev.genlayer.com/`
+- Earlier deployments are retired and are retained only in Git history.
 
-The web app can connect MetaMask, OKX Wallet, Binance Wallet, or another EIP-6963-compatible injected EVM wallet. A wallet connection only exposes the selected public address. An actual GenLayer write still requires the user to review and approve a Bradbury testnet transaction in the wallet.
+The web app can connect MetaMask, OKX Wallet, Binance Wallet, or another EIP-6963-compatible injected EVM wallet. A wallet connection only exposes the selected public address. Every GenLayer write uses the official Transaction Kit fee flow on Studio Next and still requires the user to review and approve the transaction in the wallet.
 
 ## Evidence model
 
@@ -102,9 +114,9 @@ The compact `genLayerInput` object is the only payload intended for `judge(repor
 
 The project reports an AntSeed channel's unused reserve as returned funds, not as a customer dispute. A channel that ends without a buyer-signed payment is recorded as unpaid, without automatically assigning fault.
 
-## Submission material
+## Product papers and submission material
 
-The complete Agent Tank application copy is maintained in [`HACKATHON_SUBMISSION.md`](./HACKATHON_SUBMISSION.md). The recording plan and narration are in [`DEMO_SCRIPT.md`](./DEMO_SCRIPT.md), with presentation references in [`docs/REFERENCE_SUBMISSIONS.md`](./docs/REFERENCE_SUBMISSIONS.md).
+The current English product paper is maintained in [`WHITEPAPER.md`](./WHITEPAPER.md), with a complete Chinese edition in [`WHITEPAPER_ZH.md`](./WHITEPAPER_ZH.md). The Agent Tank application copy is in [`HACKATHON_SUBMISSION.md`](./HACKATHON_SUBMISSION.md), and its Chinese reference edition is in [`HACKATHON_SUBMISSION_ZH.md`](./HACKATHON_SUBMISSION_ZH.md). The implementation roadmap is available in [`ROADMAP.md`](./ROADMAP.md) and [`ROADMAP_ZH.md`](./ROADMAP_ZH.md). The recording plan and narration are in [`DEMO_SCRIPT.md`](./DEMO_SCRIPT.md), with presentation references in [`docs/REFERENCE_SUBMISSIONS.md`](./docs/REFERENCE_SUBMISSIONS.md).
 
 ### Reproducible examples
 
@@ -114,8 +126,6 @@ The complete Agent Tank application copy is maintained in [`HACKATHON_SUBMISSION
 | Medium risk | `0xbc33134b5f441ca1aa4a47e6e79f4e170285b75f` | Revenue credibility 55, fraud risk 45, evidence sufficiency 95 |
 | High risk | `0x0329c5d3920e301740f78d6e17b8d1a11cca9b2c` | Revenue credibility 5, fraud risk 95, evidence sufficiency 95 |
 
-The high-risk report already has a stored GenLayer v2 judgment. The public site reads that existing result without requiring a wallet connection. A wallet is required only when the visitor chooses to submit a new report on Bradbury.
+The three addresses are stable product demonstrations backed by the bundled AntSeed evidence snapshot. An existing judgment from the current Studio Next contract can be read without sending a duplicate transaction. A wallet is required to submit a new judgment or to let an eligible assessed wallet claim its own credential.
 
 ![High-risk evidence summary](./docs/screenshots/03-high-summary-final.jpg)
-
-![Stored GenLayer v2 judgment](./docs/screenshots/04-high-genlayer-final.jpg)

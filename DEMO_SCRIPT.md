@@ -1,4 +1,4 @@
-# Agent Revenue Passport — demo recording plan
+# ProofRabbit (证明兔) — demo recording plan
 
 Target length: 70–85 seconds. Record at 1080p with the browser zoom set so the input, score cards, and GenLayer result remain readable. Do not show seed phrases, private keys, wallet balances, email addresses, or unrelated browser tabs.
 
@@ -12,11 +12,11 @@ Target length: 70–85 seconds. Record at 1080p with the browser zoom set so the
 
 ## 8–25 seconds — a low-risk profile
 
-**Screen:** Paste `0x4668854ba3e8b094e6f48fbeb59cec1cfde162f2`, click **Verify Agent**, then cut past the loading time. Show the 85 / 15 / 95 result and the buyer-signed settlement totals.
+**Screen:** Paste `0x4668854ba3e8b094e6f48fbeb59cec1cfde162f2`, click **Verify Agent**, then cut past the loading and wallet-confirmation time. The finished page should open on the GenLayer plain-language verdict; then show the scores and buyer-signed settlement totals below it.
 
 **Voiceover:**
 
-> Agent Revenue Passport starts with buyer-signed settlements. It checks how much the agent earned, how many payer wallets paid it, whether revenue is concentrated, and whether the payment history contains suspicious patterns.
+> ProofRabbit starts with buyer-signed settlements. It checks how much the agent earned, how many payer wallets paid it, whether revenue is concentrated, and whether the payment history contains suspicious patterns.
 
 ## 25–43 seconds — explain the medium-risk case
 
@@ -36,22 +36,23 @@ Target length: 70–85 seconds. Record at 1080p with the browser zoom set so the
 
 ## 63–80 seconds — GenLayer's role
 
-**Screen:** Scroll to **GenLayer answer**. Show the stored `agent-income-v2` judgment, its reason, the contract address, and the cited evidence. Do not send another transaction during the recording.
+**Screen:** Scroll to the **GenLayer onchain judgment** shown first in the result. Show the stored `proofrabbit-revenue-v7` case-specific explanation, its concrete findings, the Studio Next contract address, and the cited evidence. For an eligible wallet, briefly show the wallet-bound credential and its public verification page. Do not send another transaction during the recording.
 
 **Voiceover:**
 
-> GenLayer validators make the final bounded judgment: do these facts support fraudulent revenue activity? The agreed result is stored onchain, while the website turns it into a direct Chinese or English explanation.
+> GenLayer writes a conclusion for this exact address. Other validators independently assess the same evidence and agree on the key risk decision. The accepted Chinese and English analysis is stored onchain.
 
 ## Final card
 
 **On-screen text:**
 
-> Agent Revenue Passport  
+> ProofRabbit
+>
 > Verify revenue before you trust an agent.
 
 ## Recording notes
 
 - Use jump cuts to remove the 10–60 second data refresh and the optional wallet-link scan.
 - Record the three addresses in separate takes, then join them. This is cleaner than waiting on camera.
-- Keep the wallet disconnected until the final optional shot. Existing judgments are readable without a wallet.
-- If demonstrating a new GenLayer write, record the transaction only once and keep the wallet confirmation free of sensitive information.
+- For a smooth recording, use a report that already has a stored GenLayer judgment; the unified flow will load it without sending a duplicate transaction.
+- If demonstrating a genuinely new report, record the wallet confirmation once, hide sensitive wallet details, and cut the consensus wait while preserving the real before-and-after sequence.
