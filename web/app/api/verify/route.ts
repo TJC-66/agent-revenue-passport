@@ -16,10 +16,10 @@ export async function POST(request: Request) {
     }
     let antseed: any;
     try {
-      antseed = await readAntseedEvidence({ wallet }, {
+      antseed = await readAntseedEvidence({ wallet, agentId: undefined }, {
         // Continue from the durable snapshot cursor so verification never
         // leaves a silent gap between saved history and current Base events.
-        eventSource: 'rpc', resumeFromBlock: Number(ledgerSnapshot.coverage.toBlock ?? 0) + 1, lookbackBlocks: 5_000, batchSize: 1_000, allowPartialCoverage: true,
+        eventSource: 'blockscout', resumeFromBlock: Number(ledgerSnapshot.coverage.toBlock ?? 0) + 1, allowPartialCoverage: true,
       });
     } catch (error) {
       antseed = {
@@ -68,9 +68,9 @@ function buildLocalJudgmentPreview(wallet: string, antseed: any, linkage: any, i
   if (!payments?.settlementCount) {
     return {
       simulationOnly: true,
-      policyVersion: 'agent-income-v2',
+      policyVersion: 'proofrabbit-revenue-v7',
       verdict: 'no_payment_record',
-      internalEvidenceLevel: 'no_wash_signals_found',
+      internalEvidenceLevel: 'no_fraud_signals_found',
       incomeCredibility: 0,
       selfPaymentRisk: 0,
       evidenceSufficiency: 95,
@@ -128,10 +128,10 @@ function buildLocalJudgmentPreview(wallet: string, antseed: any, linkage: any, i
   // report. It must not rise or fall because a public RPC has a transient error.
   const evidenceSufficiency = lifecycle ? 95 : 82;
   const internalEvidenceLevel = officialWashProof
-    ? 'confirmed_wash_evidence'
+    ? 'confirmed_fraud_evidence'
     : linked.length > 0 || largestShare >= 0.5
-      ? 'strong_wash_signals'
-      : 'no_wash_signals_found';
+      ? 'risk_factors_present'
+      : 'no_fraud_signals_found';
 
   const reasons = [
     {
@@ -163,7 +163,7 @@ function buildLocalJudgmentPreview(wallet: string, antseed: any, linkage: any, i
 
   return {
     simulationOnly: true,
-    policyVersion: 'agent-income-v2',
+    policyVersion: 'proofrabbit-revenue-v7',
     verdict: officialWashProof || selfPaymentRisk >= 70 ? 'high_risk' : linked.length || largestShare >= 0.5 ? 'mixed' : 'credible',
     internalEvidenceLevel,
     incomeCredibility: credibility,
@@ -302,7 +302,7 @@ function buildContractInput(wallet: string, antseed: any, linkage: any, integrit
   const payments = antseed.payments;
   const activity = antseed.activity;
   return {
-    schemaVersion: '0.4.0',
+    schemaVersion: '0.5.0',
     subjectWallet: wallet.toLowerCase(),
     computedAssessment: {
       policyVersion: assessment.policyVersion,
