@@ -1,23 +1,29 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, CheckCircle2, Database, ExternalLink, Link2, LoaderCircle, QrCode, ShieldCheck, TriangleAlert, WalletCards } from 'lucide-react';
+import { ArrowRight, BadgeCheck, CheckCircle2, Copy, Database, ExternalLink, Fingerprint, Link2, LoaderCircle, QrCode, ShieldCheck, TriangleAlert, WalletCards } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { createTransactionKit } from '@genlayer/transaction-kit';
+import { GENLAYER_CHAIN, GENLAYER_EXPLORER_URL, ensureStudioNextNetwork } from '@/lib/genlayer/network';
 
-const retiredContractAddresses = new Set(['0xc97f6762f1d1ab2f1fb7c9ab17bc111d3bc2d82b']);
-const defaultContractAddress = '0x0a85C6Dd93051d11775f4F8709d372e4f821a698';
+const retiredContractAddresses = new Set([
+  '0xc97f6762f1d1ab2f1fb7c9ab17bc111d3bc2d82b',
+  '0xa54ee4a975c09c559be562a346153e3e723ad943',
+]);
+const defaultContractAddress = '0x79ab7ac7a17920354547A0B0b1d8f955F76278CC';
 const environmentContractAddress = process.env.NEXT_PUBLIC_GENLAYER_CONTRACT_ADDRESS?.trim() ?? '';
-const genLayerContractAddress = environmentContractAddress && !retiredContractAddresses.has(environmentContractAddress.toLowerCase())
+const configuredContractAddress = environmentContractAddress && !retiredContractAddresses.has(environmentContractAddress.toLowerCase())
   ? environmentContractAddress
-  : defaultContractAddress;
-const configuredExplorerUrl = process.env.NEXT_PUBLIC_GENLAYER_EXPLORER_URL?.trim() ?? '';
-const genLayerExplorerUrl = configuredExplorerUrl.toLowerCase().includes('0xc97f6762f1d1ab2f1fb7c9ab17bc111d3bc2d82b') ? '' : configuredExplorerUrl;
-const bradburyExplorerUrl = 'https://explorer-bradbury.genlayer.com/';
-const contractStorageKey = 'agentproof-genlayer-contract-address-v2';
-const expectedPolicyVersion = 'agent-income-v2';
+  : '';
+const genLayerContractAddress = configuredContractAddress || defaultContractAddress;
+const genLayerExplorerUrl = GENLAYER_EXPLORER_URL.endsWith('/') ? GENLAYER_EXPLORER_URL : `${GENLAYER_EXPLORER_URL}/`;
+const contractStorageKey = 'proofrabbit-genlayer-contract-address-v7-studio-next';
+const currentPolicyVersion = 'proofrabbit-revenue-v7';
+const currentAttestationVersion = 'proofrabbit-revenue-attestation-v3';
+const pendingTransactionStoragePrefix = 'proofrabbit-pending-judgment-v7-studio-next';
 
 type InjectedProvider = {
   request: (request: { method: string; params?: unknown[] }) => Promise<unknown>;
@@ -41,6 +47,43 @@ type Eip6963ProviderDetail = {
   info?: { uuid?: string; name?: string; rdns?: string };
   provider?: InjectedProvider;
 };
+
+type VerificationJob = {
+  wallet: string;
+  reportId: string;
+  evidenceJson: string;
+  runId: number;
+};
+
+type VerificationResponsePayload = {
+  error?: string;
+  antseed?: { payments?: { customers?: unknown[] } };
+  linkage?: unknown;
+  integrity?: unknown;
+  assessment?: unknown;
+  genLayerPreview?: unknown;
+  reportId: string;
+  evidenceJson: string;
+};
+
+type WorkflowStatus = 'idle' | 'scanning' | 'wallet' | 'submitting' | 'consensus' | 'done' | 'error';
+
+function deployedAddressFromTransaction(value: unknown) {
+  if (!value || typeof value !== 'object') return '';
+  const transaction = value as {
+    to_address?: unknown;
+    recipient?: unknown;
+    txDataDecoded?: { contractAddress?: unknown };
+    tx_data_decoded?: { contractAddress?: unknown };
+  };
+  const candidates = [
+    transaction.txDataDecoded?.contractAddress,
+    transaction.tx_data_decoded?.contractAddress,
+    transaction.to_address,
+    transaction.recipient,
+  ];
+  return candidates.find((candidate): candidate is string => typeof candidate === 'string' && /^0x[0-9a-fA-F]{40}$/.test(candidate)) ?? '';
+}
 
 export default function Home() {
   const [language, setLanguage] = useState<'zh' | 'en'>('zh');
@@ -69,15 +112,28 @@ export default function Home() {
   const [walletConnecting, setWalletConnecting] = useState(false);
   const [walletConnectError, setWalletConnectError] = useState('');
   const [contractAddress, setContractAddress] = useState(genLayerContractAddress);
+  const [contractPolicyVersion, setContractPolicyVersion] = useState('');
+  const [attestationVersion, setAttestationVersion] = useState('');
+  const [credential, setCredential] = useState<any>(null);
+  const [claimStatus, setClaimStatus] = useState<'idle' | 'connecting' | 'submitting' | 'waiting' | 'done' | 'error'>('idle');
+  const [claimTxHash, setClaimTxHash] = useState('');
+  const [claimError, setClaimError] = useState('');
+  const [copyNotice, setCopyNotice] = useState('');
   const [deployStatus, setDeployStatus] = useState<'idle' | 'connecting' | 'submitting' | 'waiting' | 'done' | 'error'>('idle');
   const [deployTxHash, setDeployTxHash] = useState('');
   const [deployError, setDeployError] = useState('');
+  const [canDeployUpgrade, setCanDeployUpgrade] = useState(false);
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>('idle');
   const runId = useRef(0);
+  const pendingVerification = useRef<VerificationJob | null>(null);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
   const hasDeployedContract = /^0x[0-9a-fA-F]{40}$/.test(contractAddress);
-  const contractExplorerUrl = genLayerExplorerUrl || (hasDeployedContract ? `${bradburyExplorerUrl}address/${contractAddress}` : bradburyExplorerUrl);
+  const hasCredentialRegistry = attestationVersion === currentAttestationVersion;
+  const contractExplorerUrl = hasDeployedContract ? `${genLayerExplorerUrl}address/${contractAddress}` : genLayerExplorerUrl;
 
   useEffect(() => {
-    if (genLayerContractAddress) return;
+    setCanDeployUpgrade(['localhost', '127.0.0.1'].includes(window.location.hostname));
+    if (configuredContractAddress) return;
     const savedAddress = window.localStorage.getItem(contractStorageKey)?.trim() ?? '';
     if (/^0x[0-9a-fA-F]{40}$/.test(savedAddress) && !retiredContractAddresses.has(savedAddress.toLowerCase())) setContractAddress(savedAddress);
   }, []);
@@ -89,6 +145,54 @@ export default function Home() {
   useEffect(() => {
     if (!contractAddress && genLayerContractAddress) setContractAddress(genLayerContractAddress);
   }, [contractAddress]);
+
+  useEffect(() => {
+    if (!hasDeployedContract) {
+      setContractPolicyVersion('');
+      setAttestationVersion('');
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const [{ createClient }, { TransactionHashVariant }] = await Promise.all([
+          import('genlayer-js'),
+          import('genlayer-js/types'),
+        ]);
+        const client = createClient({ chain: GENLAYER_CHAIN });
+        const policy = await client.readContract({
+          address: contractAddress as `0x${string}`,
+          functionName: 'get_policy_version',
+          args: [],
+          transactionHashVariant: TransactionHashVariant.LATEST_NONFINAL,
+        });
+        if (!active) return;
+        setContractPolicyVersion(typeof policy === 'string' ? policy : '');
+        try {
+          const version = await client.readContract({
+            address: contractAddress as `0x${string}`,
+            functionName: 'get_attestation_version',
+            args: [],
+            transactionHashVariant: TransactionHashVariant.LATEST_NONFINAL,
+          });
+          if (!active) return;
+          setAttestationVersion(typeof version === 'string' ? version : '');
+          if (checkedWallet) {
+            const stored = await readStoredCredential(client, contractAddress, checkedWallet, TransactionHashVariant);
+            if (active) setCredential(stored);
+          }
+        } catch {
+          if (active) setAttestationVersion('');
+        }
+      } catch {
+        if (active) {
+          setContractPolicyVersion('');
+          setAttestationVersion('');
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, [contractAddress, checkedWallet, hasDeployedContract]);
 
   useEffect(() => {
     const discovered = new Map<InjectedProvider, WalletOption>();
@@ -153,12 +257,19 @@ export default function Home() {
     try {
       setWalletConnecting(true);
       setWalletConnectError('');
-      const accounts = await option.provider.request({ method: 'eth_requestAccounts' }) as string[];
+      const alreadyAuthorized = await option.provider.request({ method: 'eth_accounts' }) as string[];
+      const accounts = alreadyAuthorized.length > 0
+        ? alreadyAuthorized
+        : await option.provider.request({ method: 'eth_requestAccounts' }) as string[];
+      const account = accounts[0] ?? '';
       setActiveWalletId(option.id);
-      setWalletAccount(accounts[0] ?? '');
+      setWalletAccount(account);
       setWalletDialogOpen(false);
+      const pending = pendingVerification.current;
+      if (pending && account) void submitPreparedReport(option, pending, account);
     } catch (caught) {
       setWalletConnectError(caught instanceof Error ? caught.message : (zh ? '钱包连接没有完成。' : 'Wallet connection did not complete.'));
+      if (pendingVerification.current) setWorkflowStatus('wallet');
     } finally {
       setWalletConnecting(false);
     }
@@ -171,7 +282,13 @@ export default function Home() {
       setError(zh ? '请输入一个完整的 Base 钱包地址（0x 开头，共 42 个字符）。' : 'Enter a complete Base wallet address (42 characters starting with 0x).');
       return;
     }
+    if (!hasDeployedContract || contractPolicyVersion !== currentPolicyVersion) {
+      setError(zh ? '请先部署上方的新版 GenLayer 合约，再开始验证地址。' : 'Deploy the new GenLayer contract above before verifying an address.');
+      return;
+    }
     const thisRun = ++runId.current;
+    pendingVerification.current = null;
+    setWorkflowStatus('scanning');
     setLoading(true);
     setCheckingLinkage(false);
     setError('');
@@ -184,103 +301,120 @@ export default function Home() {
     setChainError('');
     setChainNotice('');
     setChainJudgment(null);
+    setCredential(null);
+    setClaimStatus('idle');
+    setClaimTxHash('');
+    setClaimError('');
+    setCopyNotice('');
     try {
       const response = await fetch('/api/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: nextWallet, includeLinkage: false }) });
-      const payload = await response.json();
+      let payload = await response.json() as VerificationResponsePayload;
       if (!response.ok) throw new Error(payload.error || 'Verification failed.');
+      if (runId.current !== thisRun) return;
+      if (payload.antseed?.payments?.customers?.length) {
+        setCheckingLinkage(true);
+        try {
+          const enrichedResponse = await fetch('/api/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: nextWallet, includeLinkage: true }) });
+          const enrichedPayload = await enrichedResponse.json() as VerificationResponsePayload;
+          if (enrichedResponse.ok) payload = enrichedPayload;
+        } finally {
+          if (runId.current === thisRun) setCheckingLinkage(false);
+        }
+      }
       if (runId.current !== thisRun) return;
       setCheckedWallet(nextWallet);
       setEvidence(payload.antseed);
+      setLinkage(payload.linkage ?? null);
       setIntegrity(payload.integrity);
       setAssessment(payload.assessment);
       setGenLayerPreview(payload.genLayerPreview);
       setReportId(payload.reportId);
       setEvidenceJson(payload.evidenceJson);
       setLoading(false);
-      if (payload.antseed?.payments?.customers?.length) {
-        setCheckingLinkage(true);
-        void runWalletCheck(nextWallet, thisRun);
+
+      const job: VerificationJob = {
+        wallet: nextWallet,
+        reportId: payload.reportId,
+        evidenceJson: payload.evidenceJson,
+        runId: thisRun,
+      };
+      pendingVerification.current = job;
+
+      try {
+        const stored = await loadStoredWorkflow(job);
+        if (stored?.judgment) {
+          if (runId.current !== thisRun) return;
+          setChainJudgment(stored.judgment);
+          setCredential(stored.credential);
+          setChainStatus('done');
+          setChainNotice(zh ? '这份报告已经有 GenLayer 链上判断，因此直接读取现有结果，不会重复发送交易。' : 'This report already has a GenLayer onchain judgment, so the existing result was loaded without sending a duplicate transaction.');
+          pendingVerification.current = null;
+          setWorkflowStatus('done');
+          return;
+        }
+      } catch (caught) {
+        setChainStatus('error');
+        setChainError(describeChainError(caught, false, zh));
+        setWorkflowStatus('error');
+        return;
+      }
+
+      if (activeWallet) {
+        await submitPreparedReport(activeWallet, job);
       } else {
-        void loadExistingGenLayerJudgment(payload.reportId, thisRun);
+        setWorkflowStatus('wallet');
+        setWalletDialogOpen(true);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Verification failed.');
       setLoading(false);
+      setCheckingLinkage(false);
+      setWorkflowStatus('error');
     }
   }
 
-  async function runWalletCheck(nextWallet: string, thisRun: number) {
-    try {
-      const response = await fetch('/api/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: nextWallet, includeLinkage: true }) });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || 'Wallet check failed.');
-      if (runId.current !== thisRun) return;
-      // Keep the fast first response on screen, but use the fully enriched
-      // evidence bundle and its matching report ID for the onchain judgment.
-      // This prevents a user from submitting while payer-link checks are stale.
-      setLinkage(payload.linkage);
-      setEvidenceJson(payload.evidenceJson);
-      setReportId(payload.reportId);
-      void loadExistingGenLayerJudgment(payload.reportId, thisRun);
-    } catch {
-      // Income and official AntSeed integrity results remain usable even when
-      // the optional explorer enrichment is temporarily unavailable.
-    } finally {
-      if (runId.current === thisRun) setCheckingLinkage(false);
-    }
+  async function loadStoredWorkflow(job: VerificationJob) {
+    if (!hasDeployedContract || !job.reportId || job.reportId === '尚未生成') return null;
+    const [{ createClient }, { TransactionHashVariant }] = await Promise.all([
+      import('genlayer-js'),
+      import('genlayer-js/types'),
+    ]);
+    const client = createClient({ chain: GENLAYER_CHAIN });
+    const judgment = await readStoredJudgment(client, contractAddress, job.reportId, TransactionHashVariant);
+    if (!judgment) return null;
+    const storedCredential = hasCredentialRegistry
+      ? await readStoredCredential(client, contractAddress, job.wallet, TransactionHashVariant)
+      : null;
+    return { judgment, credential: storedCredential };
   }
 
-  async function loadExistingGenLayerJudgment(nextReportId: string, thisRun: number) {
-    if (!hasDeployedContract || !nextReportId || nextReportId === '尚未生成') return;
-    try {
-      const [{ createClient }, { testnetBradbury }, { TransactionHashVariant }] = await Promise.all([
-        import('genlayer-js'),
-        import('genlayer-js/chains'),
-        import('genlayer-js/types'),
-      ]);
-      const client = createClient({ chain: testnetBradbury });
-      const existingJudgment = await readStoredJudgment(client, contractAddress, nextReportId, TransactionHashVariant);
-      if (!existingJudgment || runId.current !== thisRun) return;
-      setChainJudgment(existingJudgment);
-      setChainStatus('done');
-      setChainNotice(zh ? '已从链上读取这份报告现有的 GenLayer 判断；查看结果不需要连接钱包。' : 'The existing GenLayer judgment was loaded from the contract. Reading it does not require a wallet connection.');
-    } catch {
-      // A missing stored result is normal for a report that has not yet been
-      // submitted. The visitor can still review the evidence without a wallet.
-    }
-  }
-
-  async function submitToGenLayer() {
-    if (!hasDeployedContract || !evidenceJson || reportId === '尚未生成') return;
-    const provider = activeWallet?.provider;
-    if (!provider) {
-      setWalletDialogOpen(true);
-      setChainStatus('idle');
-      setChainError(zh ? '请先选择并连接一个钱包，再提交链上判断。' : 'Choose and connect a wallet before submitting an onchain judgment.');
-      return;
-    }
+  async function submitPreparedReport(option: WalletOption, job: VerificationJob, knownAccount = '') {
+    if (!hasDeployedContract || !job.evidenceJson || job.reportId === '尚未生成' || runId.current !== job.runId) return;
+    const provider = option.provider;
 
     let submittedTxHash = '';
     try {
       setChainError('');
       setChainNotice('');
+      setWorkflowStatus('submitting');
       setChainStatus('connecting');
-      const accounts = await provider.request({ method: 'eth_requestAccounts' }) as string[];
-      const account = accounts[0];
+      const accounts = knownAccount ? [knownAccount] : await provider.request({ method: 'eth_requestAccounts' }) as string[];
+      const account = accounts[0] ?? '';
       if (!account || !/^0x[0-9a-fA-F]{40}$/.test(account)) throw new Error('No wallet account was selected.');
+      setActiveWalletId(option.id);
       setWalletAccount(account);
+      await ensureStudioNextNetwork(provider);
 
-      const [{ createClient }, { testnetBradbury }, { TransactionHashVariant }] = await Promise.all([
+      const [{ createClient }, { TransactionHashVariant }] = await Promise.all([
         import('genlayer-js'),
-        import('genlayer-js/chains'),
         import('genlayer-js/types'),
       ]);
-      const client = createClient({
-        chain: testnetBradbury,
+      const client = createClient({ chain: GENLAYER_CHAIN });
+      const kit = createTransactionKit({
+        chain: GENLAYER_CHAIN,
+        provider,
         account: account as `0x${string}`,
-        provider: provider as any,
       });
-      await client.connect('testnetBradbury');
 
       let deployedPolicyVersion: unknown;
       try {
@@ -293,60 +427,84 @@ export default function Home() {
       } catch {
         throw new Error('LEGACY_CONTRACT');
       }
-      if (deployedPolicyVersion !== expectedPolicyVersion) throw new Error('LEGACY_CONTRACT');
+      if (deployedPolicyVersion !== currentPolicyVersion) throw new Error('CREDENTIAL_UPGRADE_REQUIRED');
 
-      const existingJudgment = await readStoredJudgment(client, contractAddress, reportId, TransactionHashVariant);
+      const existingJudgment = await readStoredJudgment(client, contractAddress, job.reportId, TransactionHashVariant);
       if (existingJudgment) {
+        if (runId.current !== job.runId) return;
         setChainJudgment(existingJudgment);
+        if (hasCredentialRegistry) setCredential(await readStoredCredential(client, contractAddress, job.wallet, TransactionHashVariant));
         setChainStatus('done');
         setChainNotice(zh ? '这份报告已经判断过，已直接读取链上结果；没有再次发送交易。' : 'This report was already judged. Its stored result was loaded without sending another transaction.');
+        pendingVerification.current = null;
+        setWorkflowStatus('done');
         return;
       }
 
-      setChainStatus('submitting');
-      const txHash = await client.writeContract({
-        address: contractAddress as `0x${string}`,
-        functionName: 'judge',
-        args: [reportId, evidenceJson],
-        value: 0n,
-      }) as `0x${string}`;
+      const pendingKey = pendingTransactionStorageKey(contractAddress, job.reportId);
+      const rememberedHash = window.localStorage.getItem(pendingKey)?.trim() ?? '';
+      let txHash: `0x${string}`;
+      if (/^0x[0-9a-fA-F]{64}$/.test(rememberedHash)) {
+        txHash = rememberedHash as `0x${string}`;
+        setChainNotice(zh ? '这份报告已有一笔交易正在处理，网页会继续跟踪原交易，不会重复扣测试币。' : 'This report already has a pending transaction. The site will resume that transaction instead of charging test tokens again.');
+      } else {
+        setChainStatus('submitting');
+        const transaction = {
+          kind: 'write' as const,
+          address: contractAddress as `0x${string}`,
+          method: 'judge',
+          args: [job.reportId, job.evidenceJson],
+        };
+        const quote = await kit.estimate({ preset: 'standard' }, transaction);
+        const submitted = await kit.submit(quote, transaction);
+        txHash = submitted.genlayerTxId;
+        window.localStorage.setItem(pendingKey, txHash);
+      }
       submittedTxHash = txHash;
       setChainTxHash(txHash);
       setChainStatus('waiting');
+      setWorkflowStatus('consensus');
 
-      await waitForSuccessfulGenLayerResult(client, txHash);
-      let storedJudgment: unknown;
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        try {
-          storedJudgment = await client.readContract({
-            address: contractAddress as `0x${string}`,
-            functionName: 'get_judgment',
-            args: [reportId],
-            transactionHashVariant: TransactionHashVariant.LATEST_NONFINAL,
-          });
-          break;
-        } catch (readError) {
-          if (attempt === 5) throw readError;
-          await new Promise((resolve) => setTimeout(resolve, 2_000));
-        }
+      const tracked = await kit.track(txHash, () => undefined, { until: 'decided' });
+      if (tracked.successful === false) {
+        throw new Error(`GenLayer transaction execution failed: ${tracked.executionResultName || tracked.statusName || 'unknown'}`);
+      }
+      let storedJudgment: any = null;
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        storedJudgment = await readStoredJudgment(client, contractAddress, job.reportId, TransactionHashVariant);
+        if (storedJudgment) break;
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+      }
+      if (!storedJudgment) {
+        window.localStorage.removeItem(pendingKey);
+        throw new Error('NO_CONSENSUS_RESULT');
       }
       const parsedJudgment = typeof storedJudgment === 'string' ? JSON.parse(storedJudgment) : storedJudgment;
+      if (runId.current !== job.runId) return;
       setChainJudgment(parsedJudgment);
+      if (hasCredentialRegistry) setCredential(await readStoredCredential(client, contractAddress, job.wallet, TransactionHashVariant));
       setChainStatus('done');
+      setChainNotice(zh ? 'GenLayer 判断已经写入合约。下面一次性显示最终结论、证据和凭证资格。' : 'The GenLayer judgment is stored onchain. The final verdict, evidence, and credential eligibility are now shown together.');
+      window.localStorage.removeItem(pendingKey);
+      pendingVerification.current = null;
+      setWorkflowStatus('done');
     } catch (caught) {
       if (submittedTxHash) {
         try {
-          const [{ createClient }, { testnetBradbury }, { TransactionHashVariant }] = await Promise.all([
+          const [{ createClient }, { TransactionHashVariant }] = await Promise.all([
             import('genlayer-js'),
-            import('genlayer-js/chains'),
             import('genlayer-js/types'),
           ]);
-          const recoveryClient = createClient({ chain: testnetBradbury });
-          const existingJudgment = await readStoredJudgment(recoveryClient, contractAddress, reportId, TransactionHashVariant);
+          const recoveryClient = createClient({ chain: GENLAYER_CHAIN });
+          const existingJudgment = await readStoredJudgment(recoveryClient, contractAddress, job.reportId, TransactionHashVariant);
           if (existingJudgment) {
             setChainJudgment(existingJudgment);
+            if (hasCredentialRegistry) setCredential(await readStoredCredential(recoveryClient, contractAddress, job.wallet, TransactionHashVariant));
             setChainStatus('done');
             setChainNotice(zh ? '这份报告之前已经写入合约；本次重复交易失败，但已为你读取原来的链上结果。' : 'This report was already stored. The duplicate transaction failed, but the original onchain result has been loaded.');
+            window.localStorage.removeItem(pendingTransactionStorageKey(contractAddress, job.reportId));
+            pendingVerification.current = null;
+            setWorkflowStatus('done');
             return;
           }
         } catch {
@@ -354,13 +512,19 @@ export default function Home() {
           // result can be recovered safely.
         }
       }
+      if (submittedTxHash && /transaction execution failed|finished_with_error|not_voted|undetermined/i.test(genLayerErrorSearchText(caught))) {
+        // A finalized failed transaction is not pending anymore. Keeping its
+        // hash would make every retry follow the same failed transaction and
+        // prevent the corrected contract from receiving a fresh judgment.
+        window.localStorage.removeItem(pendingTransactionStorageKey(contractAddress, job.reportId));
+      }
       setChainStatus('error');
       setChainError(describeChainError(caught, Boolean(submittedTxHash), zh));
+      setWorkflowStatus('error');
     }
   }
 
   async function deployToGenLayer() {
-    if (hasDeployedContract) return;
     const provider = activeWallet?.provider;
     if (!provider) {
       setWalletDialogOpen(true);
@@ -372,52 +536,166 @@ export default function Home() {
     let txHash: `0x${string}` | undefined;
     try {
       setDeployError('');
+      setDeployTxHash('');
       setDeployStatus('connecting');
-      const accounts = await provider.request({ method: 'eth_requestAccounts' }) as string[];
+      const alreadyAuthorized = await provider.request({ method: 'eth_accounts' }) as string[];
+      const accounts = alreadyAuthorized.length > 0
+        ? alreadyAuthorized
+        : await provider.request({ method: 'eth_requestAccounts' }) as string[];
       const account = accounts[0];
       if (!account || !/^0x[0-9a-fA-F]{40}$/.test(account)) throw new Error('No wallet account was selected.');
       setWalletAccount(account);
+      await ensureStudioNextNetwork(provider);
 
       const sourceResponse = await fetch('/contracts/income_credibility_judge.py', { cache: 'no-store' });
       if (!sourceResponse.ok) throw new Error('Could not load the verified contract source.');
       const code = await sourceResponse.text();
-      if (!code.includes('class IncomeCredibilityJudge') || !code.includes(`POLICY_VERSION = "${expectedPolicyVersion}"`) || !code.startsWith('# { "Depends": "py-genlayer:')) {
+      if (!code.includes('class IncomeCredibilityJudge') || !code.includes(`POLICY_VERSION = "${currentPolicyVersion}"`) || !code.includes(`ATTESTATION_VERSION = "${currentAttestationVersion}"`) || !code.startsWith('# { "Depends": "py-genlayer:')) {
         throw new Error('The contract source failed its local identity check.');
       }
 
-      const [{ createClient }, { testnetBradbury }] = await Promise.all([
-        import('genlayer-js'),
-        import('genlayer-js/chains'),
-      ]);
-      const client = createClient({
-        chain: testnetBradbury,
+      const kit = createTransactionKit({
+        chain: GENLAYER_CHAIN,
+        provider,
         account: account as `0x${string}`,
-        provider: provider as any,
       });
-      await client.connect('testnetBradbury');
-
       setDeployStatus('submitting');
-      txHash = await client.deployContract({ code, args: [] });
+      const transaction = { kind: 'deploy' as const, code, args: [] };
+      const quote = await kit.estimate({ preset: 'standard' }, transaction);
+      const submitted = await kit.submit(quote, transaction);
+      txHash = submitted.genlayerTxId;
       setDeployTxHash(txHash);
       setDeployStatus('waiting');
 
-      const receipt = await waitForSuccessfulDeployment(client, txHash);
-      if (receipt.txExecutionResultName && receipt.txExecutionResultName !== 'FINISHED_WITH_RETURN') {
-        throw new Error(`Contract deployment execution failed: ${receipt.txExecutionResultName}`);
+      const tracked = await kit.track(txHash, () => undefined, { until: 'decided' });
+      if (tracked.successful !== true) {
+        throw new Error(`Contract deployment execution failed: ${tracked.executionResultName || tracked.statusName || 'unknown'}`);
       }
-      const deployedAddress = receipt.txDataDecoded?.type === 'deploy' ? receipt.txDataDecoded.contractAddress : undefined;
+      const rawDeployment = tracked.contractAddress
+        ? null
+        : await provider.request({ method: 'eth_getTransactionByHash', params: [txHash] }).catch(() => null);
+      const deployedAddress = tracked.contractAddress || deployedAddressFromTransaction(rawDeployment);
       if (!deployedAddress || !/^0x[0-9a-fA-F]{40}$/.test(deployedAddress)) {
         throw new Error('Deployment finalized, but the contract address was not returned. Keep the transaction ID and inspect it before retrying.');
       }
 
       setContractAddress(deployedAddress);
       window.localStorage.setItem(contractStorageKey, deployedAddress);
+      setContractPolicyVersion(currentPolicyVersion);
+      setAttestationVersion(currentAttestationVersion);
+      setCredential(null);
+      setChainJudgment(null);
+      setChainStatus('idle');
+      setChainNotice(zh ? 'Studio Next 合约已经部署。现在可以提交地址，让 GenLayer 生成并核对针对该地址的完整分析。' : 'The Studio Next contract is deployed. You can now submit an address for GenLayer to generate and validate its complete analysis.');
       setDeployStatus('done');
     } catch (caught) {
       setDeployStatus('error');
       const message = caught instanceof Error ? caught.message : 'GenLayer contract deployment failed.';
-      setDeployError(txHash ? `${message} ${zh ? '交易已经发出，请先核对这笔交易，不要重复部署。' : 'A transaction was already submitted; inspect it before retrying.'}` : message);
+      setDeployError(txHash
+        ? `${message} ${zh ? 'Studio Next 交易已经生成，请先核对这笔交易，不要重复部署。' : 'A Studio Next transaction was created; inspect it before retrying.'}`
+        : describeChainError(caught, false, zh));
     }
+  }
+
+  async function claimRevenueCredential() {
+    if (!hasCredentialRegistry || !chainJudgment || !checkedWallet) return;
+    const provider = activeWallet?.provider;
+    if (!provider) {
+      setWalletDialogOpen(true);
+      setClaimError(zh ? '请先连接被验证地址对应的钱包。' : 'Connect the wallet that owns the assessed address.');
+      return;
+    }
+
+    let submittedTxHash = '';
+    try {
+      setClaimError('');
+      setCopyNotice('');
+      setClaimStatus('connecting');
+      const accounts = await provider.request({ method: 'eth_requestAccounts' }) as string[];
+      const account = accounts[0];
+      if (!account || account.toLowerCase() !== checkedWallet.toLowerCase()) {
+        throw new Error('CLAIMANT_MISMATCH');
+      }
+      setWalletAccount(account);
+      await ensureStudioNextNetwork(provider);
+
+      const [{ createClient }, { TransactionHashVariant }] = await Promise.all([
+        import('genlayer-js'),
+        import('genlayer-js/types'),
+      ]);
+      const client = createClient({ chain: GENLAYER_CHAIN });
+      const kit = createTransactionKit({
+        chain: GENLAYER_CHAIN,
+        provider,
+        account: account as `0x${string}`,
+      });
+
+      const existing = await readStoredCredential(client, contractAddress, checkedWallet, TransactionHashVariant);
+      if (existing?.report_id === reportId && existing?.status !== 'revoked') {
+        setCredential(existing);
+        setClaimStatus('done');
+        return;
+      }
+
+      setClaimStatus('submitting');
+      const transaction = {
+        kind: 'write' as const,
+        address: contractAddress as `0x${string}`,
+        method: 'claim_credential',
+        args: [reportId],
+      };
+      const quote = await kit.estimate({ preset: 'standard' }, transaction);
+      const submitted = await kit.submit(quote, transaction);
+      const txHash = submitted.genlayerTxId;
+      submittedTxHash = txHash;
+      setClaimTxHash(txHash);
+      setClaimStatus('waiting');
+      const tracked = await kit.track(txHash, () => undefined, { until: 'decided' });
+      if (tracked.successful === false) {
+        throw new Error(`GenLayer transaction execution failed: ${tracked.executionResultName || tracked.statusName || 'unknown'}`);
+      }
+
+      let stored = null;
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        stored = await readStoredCredential(client, contractAddress, checkedWallet, TransactionHashVariant);
+        if (stored) break;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      if (!stored) throw new Error('Credential was issued but is not readable yet.');
+      setCredential(stored);
+      setClaimStatus('done');
+    } catch (caught) {
+      setClaimStatus('error');
+      const message = caught instanceof Error ? caught.message : String(caught || 'Unknown error');
+      if (/CLAIMANT_MISMATCH/.test(message)) {
+        setClaimError(zh ? '只有被验证地址本人可以领取这份凭证。请切换到与该地址完全一致的钱包。' : 'Only the assessed wallet can claim this credential. Switch to that exact wallet address.');
+      } else {
+        setClaimError(describeChainError(caught, Boolean(submittedTxHash), zh));
+      }
+    }
+  }
+
+  async function copyCredentialLink() {
+    if (!checkedWallet || !hasCredentialRegistry) return;
+    const url = `${window.location.origin}/proof/${checkedWallet}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyNotice(zh ? '链上核验链接已复制。' : 'Onchain verification link copied.');
+    } catch {
+      setCopyNotice(url);
+    }
+  }
+
+  function continuePendingVerification() {
+    const pending = pendingVerification.current;
+    if (!pending) return;
+    setChainError('');
+    if (activeWallet) {
+      void submitPreparedReport(activeWallet, pending);
+      return;
+    }
+    setWorkflowStatus('wallet');
+    setWalletDialogOpen(true);
   }
 
   const payments = evidence?.payments;
@@ -429,8 +707,17 @@ export default function Home() {
   const topPayers = payments?.customerBreakdown?.slice(0, 5) ?? [];
   const lifecycle = payments?.lifecycle;
   const chainReasonCodes = cleanChainReasonCodes(chainJudgment?.reason_codes, payments);
-  const chainTone = chainVerdictTone(chainJudgment?.verdict);
   const chainPoints = plainJudgmentPoints(chainJudgment, payments, indicators, Boolean(linkage), integrity, zh);
+  const credentialEligible = isCredentialEligible(chainJudgment);
+  const resultsReady = workflowStatus === 'done' && Boolean(evidence && chainJudgment);
+  const verificationBusy = ['scanning', 'wallet', 'submitting', 'consensus'].includes(workflowStatus);
+  const canContinuePendingVerification = workflowStatus === 'error' && Boolean(evidenceJson && reportId !== '尚未生成');
+
+  useEffect(() => {
+    if (!resultsReady) return;
+    const frame = window.requestAnimationFrame(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [resultsReady]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -439,7 +726,9 @@ export default function Home() {
           <DialogHeader>
             <DialogTitle>{zh ? '选择钱包' : 'Choose a wallet'}</DialogTitle>
             <DialogDescription>
-              {zh ? '这里只会请求读取你主动选择的公开地址。连接本身不会发交易、不会要求签名，也不会读取助记词或私钥。' : 'This only requests the public address from the wallet you choose. Connecting does not send a transaction, request a signature, or access a seed phrase or private key.'}
+              {workflowStatus === 'wallet'
+                ? (zh ? '证据已经准备好。选择钱包后，钱包会显示 Studio Next 的 GenLayer 判断交易；请核对后亲自确认。网站不会读取助记词或私钥，也不会请求代币授权。' : 'The evidence is ready. After you choose a wallet, it will show the Studio Next transaction for the GenLayer judgment. Review and approve it yourself. The site never reads seed phrases or private keys and never requests token approval.')
+                : (zh ? '这里只会请求读取你主动选择的公开地址。连接本身不会发交易、不会要求签名，也不会读取助记词或私钥。' : 'This only requests the public address from the wallet you choose. Connecting does not send a transaction, request a signature, or access a seed phrase or private key.')}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -461,8 +750,8 @@ export default function Home() {
       <header className="border-b border-white/8">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
           <div className="flex items-center gap-3">
-            <img src="/agent-revenue-passport-logo.svg" alt="" className="size-8 rounded-lg" />
-            <div><p className="text-sm font-semibold tracking-tight">Agent Revenue Passport</p><p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{hasDeployedContract ? (zh ? '由 GenLayer 合约支持' : 'Powered by a GenLayer contract') : (zh ? 'GenLayer 就绪原型' : 'GenLayer-ready prototype')}</p></div>
+            <img src="/proofrabbit-logo.png" alt="ProofRabbit" className="size-9 rounded-xl object-cover" />
+            <div><p className="text-sm font-semibold tracking-tight">ProofRabbit <span className="font-normal text-muted-foreground">证明兔</span></p><p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{hasDeployedContract ? (zh ? '由 GenLayer 链上判断支持' : 'Onchain judgment by GenLayer') : (zh ? 'GenLayer 就绪原型' : 'GenLayer-ready prototype')}</p></div>
           </div>
           <div className="flex items-center gap-2">
             <Button type="button" variant="outline" onClick={() => setWalletDialogOpen(true)} disabled={walletConnecting} className="border-white/10 bg-white/[0.04] text-white hover:bg-white/10">
@@ -481,34 +770,69 @@ export default function Home() {
       <section className="mx-auto max-w-6xl px-5 py-10 sm:py-14">
         {walletConnectError && <p role="alert" className="mb-5 rounded-xl border border-red-300/20 bg-red-300/8 px-4 py-3 text-sm text-red-200">{walletConnectError}</p>}
         <div className="mb-9 max-w-3xl">
-          <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-violet-300">{zh ? '购买前智能审查' : 'Pre-purchase intelligence'}</p>
+          <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-violet-300">{zh ? 'AI Agent 收入验证与欺诈判断' : 'AI agent revenue verification'}</p>
           <h1 className="text-balance text-4xl font-semibold leading-[1.05] tracking-[-0.04em] sm:text-6xl">{zh ? '信任一个 Agent 前，先核验它的收入声明。' : 'Check an agent’s revenue claims before you trust them.'}</h1>
           <p className="mt-5 max-w-2xl text-base leading-7 text-muted-foreground sm:text-lg">{zh ? '核对公开付款证据、钱包关联线索，并准备可解释的 GenLayer 共识裁决——不会把每一笔转账都冒充收入。' : 'Public payment evidence, wallet-link clues, and an explainable GenLayer consensus verdict—without pretending that every transfer is income.'}</p>
         </div>
 
+        {canDeployUpgrade && contractPolicyVersion !== currentPolicyVersion && <section className="panel mb-8 border-violet-300/20 p-6 sm:p-7">
+          <p className="section-label text-violet-200">{zh ? 'Studio Next 合约已准备好' : 'Studio Next contract ready'}</p>
+          <h2 className="mt-2 text-xl font-semibold">{zh ? '部署比赛要求的正式分析合约' : 'Deploy the hackathon-ready analysis contract'}</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{zh ? '合约将部署到比赛指定的 Studio Next（Chain ID 61997），并使用官方 Transaction Kit 读取实时费用。它会针对每个地址生成具体结论，再由其他验证者核对结论是否忠于链上证据。最终交易仍需由你在钱包中亲自确认。' : 'The contract will deploy to the required Studio Next network (chain ID 61997) with live fees from the official Transaction Kit. It produces a case-specific conclusion and validators check that it is grounded in the evidence. You still approve the final transaction in your wallet.'}</p>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button type="button" onClick={() => void deployToGenLayer()} disabled={['connecting', 'submitting', 'waiting'].includes(deployStatus)} className="bg-violet-200 text-violet-950 hover:bg-violet-100">
+              {deployStatus === 'connecting' ? (zh ? '正在切换 Studio Next…' : 'Switching to Studio Next…') : deployStatus === 'submitting' ? (zh ? '请在钱包核对费用并确认…' : 'Review the fee and confirm in wallet…') : deployStatus === 'waiting' ? (zh ? '等待 Studio Next 完成共识…' : 'Waiting for Studio Next consensus…') : (zh ? '部署 Studio Next 合约' : 'Deploy to Studio Next')}
+            </Button>
+            {deployTxHash && <a className="break-all font-mono text-[10px] text-violet-200 hover:text-violet-100" href={`${genLayerExplorerUrl}tx/${deployTxHash}`} target="_blank" rel="noreferrer">{zh ? '部署交易：' : 'Deployment: '}{deployTxHash}</a>}
+          </div>
+          {deployError && <p role="alert" className="mt-3 rounded-xl border border-red-300/20 bg-red-300/8 p-3 text-xs leading-5 text-red-200">{deployError}</p>}
+        </section>}
+
         <form onSubmit={runCheck} className="search-shell mb-10 flex flex-col gap-3 p-2 sm:flex-row">
           <Input required autoComplete="off" spellCheck={false} aria-label={zh ? 'Agent 钱包地址' : 'Agent wallet address'} value={wallet} onChange={(event) => setWallet(event.target.value)} className="h-12 flex-1 border-0 bg-transparent px-4 font-mono text-sm focus-visible:ring-0" placeholder={zh ? '输入 Base 上的 Agent 钱包地址' : 'Enter an Agent wallet on Base'} />
-          <Button type="submit" size="lg" disabled={loading} className="h-12 rounded-xl bg-white px-5 text-black hover:bg-white/85">{loading ? <><LoaderCircle className="animate-spin" /> {zh ? '正在检查…' : 'Checking…'}</> : <>{zh ? '验证 Agent' : 'Verify agent'} <ArrowRight /></>}</Button>
+          <Button type="submit" size="lg" disabled={verificationBusy} className="h-12 rounded-xl bg-white px-5 text-black hover:bg-white/85">{verificationBusy ? <><LoaderCircle className="animate-spin" /> {zh ? '正在完成验证…' : 'Completing verification…'}</> : <>{zh ? '验证 Agent' : 'Verify agent'} <ArrowRight /></>}</Button>
         </form>
 
-        {(loading || checkingLinkage) && <div className="-mt-6 mb-8 flex items-center gap-2 text-sm text-violet-200"><LoaderCircle className="size-4 animate-spin" />{loading ? (zh ? '正在读取并更新收入账本，通常约 10–60 秒…' : 'Loading and updating the income ledger, usually 10–60 seconds…') : (zh ? '收入已经显示，正在检查主要付款钱包，通常约 30–60 秒…' : 'Income is ready. Checking major payer wallets, usually 30–60 seconds…')}</div>}
+        {verificationBusy && <section className="panel mb-8 p-6 sm:p-7" aria-live="polite">
+          <div className="flex items-start gap-4">
+            <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-full border border-violet-300/20 bg-violet-300/8"><LoaderCircle className="size-5 animate-spin text-violet-200" /></div>
+            <div className="min-w-0">
+              <p className="section-label">{zh ? '正在完成整套验证' : 'Completing the full verification'}</p>
+              <h2 className="mt-2 text-xl font-semibold">{workflowStatus === 'scanning'
+                ? (checkingLinkage ? (zh ? '正在检查付款钱包之间的资金关联' : 'Checking financial links among payer wallets') : (zh ? '正在更新收入账本并整理结算证据' : 'Updating the income ledger and assembling settlement evidence'))
+                : workflowStatus === 'wallet'
+                  ? (zh ? '证据已经准备好，请选择钱包并确认交易' : 'Evidence is ready. Choose a wallet and confirm the transaction')
+                  : workflowStatus === 'submitting'
+                    ? (zh ? '请在钱包中确认 GenLayer 判断交易' : 'Confirm the GenLayer judgment transaction in your wallet')
+                    : (zh ? '交易已提交，正在等待 GenLayer 完成判断' : 'Transaction submitted; waiting for GenLayer to finish the judgment')}</h2>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{zh ? '结论和证据不会分批出现。等数据扫描、钱包确认和 GenLayer 判断全部完成后，页面会先显示 GenLayer 的明确结论，再一次性显示证据、分数和凭证资格。' : 'No partial result is shown. After data scanning, wallet confirmation, and the GenLayer judgment all finish, the page shows the GenLayer verdict first, followed by the evidence, scores, and credential eligibility together.'}</p>
+              {workflowStatus === 'consensus' && <p className="mt-2 max-w-3xl text-sm leading-6 text-violet-200">{zh ? '通常约需 1–3 分钟；测试网繁忙时可能需要约 5 分钟。交易编号出现后请耐心等待，不要重复提交。' : 'This usually takes 1–3 minutes and may take about 5 minutes when the test network is busy. Once a transaction number appears, please wait instead of submitting again.'}</p>}
+              {workflowStatus === 'wallet' && <Button type="button" onClick={() => setWalletDialogOpen(true)} className="mt-4 bg-violet-200 text-violet-950 hover:bg-violet-100"><WalletCards />{zh ? '选择钱包继续' : 'Choose wallet to continue'}</Button>}
+              {chainTxHash && <a className="mt-3 inline-flex break-all font-mono text-[10px] text-violet-200 hover:text-violet-100" href={`${genLayerExplorerUrl}tx/${chainTxHash}`} target="_blank" rel="noreferrer">{zh ? '交易编号：' : 'Transaction: '}{chainTxHash}</a>}
+            </div>
+          </div>
+        </section>}
 
         {error && <p role="alert" className="mb-6 rounded-xl border border-red-300/20 bg-red-300/8 px-4 py-3 text-sm text-red-200">{error}</p>}
 
-        {evidence && <>
+        {workflowStatus === 'error' && chainError && <div className="mb-8 rounded-xl border border-red-300/20 bg-red-300/8 p-4 text-sm text-red-100"><p>{chainError}</p>{chainTxHash && <a className="mt-3 block break-all font-mono text-[10px] text-red-100 underline decoration-red-200/40 underline-offset-4" href={`${genLayerExplorerUrl}tx/${chainTxHash}`} target="_blank" rel="noreferrer">{zh ? '查看失败交易：' : 'Inspect failed transaction: '}{chainTxHash}</a>}{canContinuePendingVerification && <Button type="button" onClick={continuePendingVerification} variant="outline" className="mt-4 border-red-200/20 bg-black/10 text-white hover:bg-black/20">{zh ? '继续跟踪原交易' : 'Continue tracking the original transaction'}</Button>}</div>}
+
+        {resultsReady && <div ref={resultsRef} className="scroll-mt-6"><>
         {checkedWallet && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div><p className="text-xs text-muted-foreground">{zh ? '正在分析' : 'Analysis for'}</p><p className="mt-1 max-w-[78vw] truncate font-mono text-sm text-white">{checkedWallet}</p></div>
+          <div><p className="text-xs text-muted-foreground">{zh ? '已验证地址' : 'Verified address'}</p><p className="mt-1 max-w-[78vw] truncate font-mono text-sm text-white">{checkedWallet}</p></div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_#34d399]" />{zh ? '证据来自公开数据源' : 'Evidence fetched from public sources'}</div>
         </div>}
+
+        {chainJudgment && <ChainJudgmentPanel judgment={chainJudgment} payments={payments} indicators={indicators} walletLinksChecked={Boolean(linkage)} integrity={integrity} reasonCodes={chainReasonCodes} points={chainPoints} zh={zh} />}
 
         <div className="grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
           <section className="panel p-6 sm:p-7">
             <div className="mb-6 flex items-start justify-between gap-4">
-              <div><p className="section-label">{zh ? '目前查到的结果' : 'Current finding'}</p><h2 className={`mt-2 text-2xl font-semibold tracking-tight ${integrity?.provenWashTrader || Number(genLayerPreview?.selfPaymentRisk ?? 0) >= 70 ? 'text-red-300' : ''}`}>{!evidence ? (zh ? '输入钱包后开始验证' : 'Enter a wallet to begin') : !evidence.found ? (zh ? '该地址没有买方签名的 AntSeed 付款记录' : 'No buyer-signed AntSeed payment for this address') : checkingLinkage ? (zh ? '已找到收入记录，正在补充钱包关系' : 'Income records found; wallet enrichment is running') : (zh ? '已找到买方签名付款记录' : 'Buyer-signed payment records found')}</h2></div>
-              <div className="score-ring"><span className={positiveScoreClass(genLayerPreview?.incomeCredibility)}>{genLayerPreview?.incomeCredibility ?? '—'}</span><small>{zh ? '效果预览' : 'preview'}</small></div>
+              <div><p className="section-label">{zh ? '证据与评分细节' : 'Evidence and score details'}</p><h2 className={`mt-2 text-2xl font-semibold tracking-tight ${integrity?.provenWashTrader || Number(chainJudgment?.self_payment_risk ?? 0) >= 70 ? 'text-red-300' : ''}`}>{!evidence?.found ? (zh ? '没有找到买方签名的 AntSeed 付款记录' : 'No buyer-signed AntSeed payment was found') : (zh ? '已读取买方签名付款记录' : 'Buyer-signed payment records loaded')}</h2></div>
+              <div className="score-ring"><span className={positiveScoreClass(chainJudgment?.income_credibility)}>{chainJudgment?.income_credibility ?? '—'}</span><small>{zh ? '链上评分' : 'onchain'}</small></div>
             </div>
             <p className="max-w-2xl leading-7 text-muted-foreground">{zh ? plainChineseSummary(payments, indicators, checkingLinkage, integrity) : (assessment?.explanation ?? 'Buyer-approved payment evidence was found.')}</p>
-            <div className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric label={zh ? '收入记录可信度' : 'Revenue evidence'} value={genLayerPreview ? formatScore(genLayerPreview.incomeCredibility, zh) : payments?.settlementCount ? (zh ? '已找到收入' : 'Income found') : (zh ? '等待验证' : 'Awaiting check')} valueClassName={positiveScoreClass(genLayerPreview?.incomeCredibility)} /><Metric label={zh ? '欺诈风险' : 'Fraud risk'} value={genLayerPreview ? formatScore(genLayerPreview.selfPaymentRisk, zh) : (zh ? '等待检查' : 'Awaiting check')} valueClassName={riskScoreClass(genLayerPreview?.selfPaymentRisk)} /><Metric label={zh ? '证据充分程度' : 'Evidence sufficiency'} value={genLayerPreview ? formatScore(genLayerPreview.evidenceSufficiency, zh) : '—'} valueClassName={positiveScoreClass(genLayerPreview?.evidenceSufficiency)} /><Metric label={zh ? '买方签名付款率' : 'Buyer-signed payment rate'} value={formatPercent(lifecycle?.buyerAcceptanceRate, '—')} valueClassName="text-violet-200" /></div>
+            <div className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric label={zh ? '收入记录可信度' : 'Revenue evidence'} value={formatScore(chainJudgment?.income_credibility, zh)} valueClassName={positiveScoreClass(chainJudgment?.income_credibility)} /><Metric label={zh ? '欺诈风险' : 'Fraud risk'} value={formatScore(chainJudgment?.self_payment_risk, zh)} valueClassName={riskScoreClass(chainJudgment?.self_payment_risk)} /><Metric label={zh ? '证据充分程度' : 'Evidence sufficiency'} value={formatScore(chainJudgment?.evidence_sufficiency, zh)} valueClassName={positiveScoreClass(chainJudgment?.evidence_sufficiency)} /><Metric label={zh ? '买方签名付款率' : 'Buyer-signed payment rate'} value={formatPercent(lifecycle?.buyerAcceptanceRate, '—')} valueClassName="text-violet-200" /></div>
             <div className="mt-7 border-t border-white/8 pt-6">
               <p className="section-label mb-4">{zh ? '判断依据' : 'Why this result'}</p>
               <div className="space-y-3">
@@ -529,7 +853,7 @@ export default function Home() {
               <div className="flex items-center gap-3"><ShieldCheck className="text-emerald-300" /><h2 className="font-semibold">{zh ? '钱包证据' : 'Wallet evidence'}</h2></div>
               <p className="mt-4 text-xs text-muted-foreground">{zh ? '观察到的客户地址' : 'Observed customer'}</p><p className="mt-1 truncate font-mono text-xs text-white">{observedCustomer}</p>
               <div className="mt-4 flex flex-wrap gap-2">
-                <Badge variant="outline" className="border-violet-300/25 text-violet-200">{zh ? '等待 GenLayer 最终判断' : 'Awaiting GenLayer judgment'}</Badge>
+                <Badge variant="outline" className="border-emerald-300/25 text-emerald-200">{zh ? 'GenLayer 已完成判断' : 'GenLayer judgment complete'}</Badge>
                 {checkingLinkage ? <Badge variant="outline" className="border-violet-300/25 text-violet-200">{zh ? '正在补充钱包关系' : 'Checking wallet links'}</Badge> : indicators.length ? indicators.map((item) => <Badge key={item} variant="outline" className="border-amber-300/25 text-amber-200">{labelValue(item, zh)}</Badge>) : linkage ? <Badge variant="outline">{zh ? '抽查未发现直接关联' : 'No direct link in sample'}</Badge> : null}
               </div>
               {checkedWallet && <a className="mt-5 inline-flex items-center gap-1.5 text-xs text-violet-300 hover:text-violet-200" href={`https://base.blockscout.com/address/${checkedWallet}`} target="_blank" rel="noreferrer">{zh ? '在 Blockscout 查看' : 'Inspect on Blockscout'} <ExternalLink className="size-3" /></a>}
@@ -546,65 +870,50 @@ export default function Home() {
         <section className="panel mt-4 p-6 sm:p-7">
           <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-start">
             <div className="max-w-2xl">
-              <p className="section-label">{zh ? '交给 GenLayer' : 'GenLayer handoff'}</p>
-              <h2 className="mt-2 text-xl font-semibold tracking-tight">{hasDeployedContract ? (zh ? 'GenLayer 智能合约' : 'GenLayer Intelligent Contract') : (zh ? 'GenLayer 判断结果预览' : 'GenLayer judgment preview')}</h2>
-              {!hasDeployedContract && genLayerPreview && <p className="mt-3 text-base leading-7 text-white">{previewSummary(genLayerPreview, integrity, zh)}</p>}
-              {!hasDeployedContract && <p className="mt-3 text-sm leading-6 text-muted-foreground">{zh ? '这里先展示最终产品的判断效果。部署智能合约后，同一批证据会交给 GenLayer 验证者正式判断。' : 'This previews the final product experience. After deployment, the same evidence is formally judged by GenLayer validators.'}</p>}
-              {hasDeployedContract && !chainJudgment && <p className="mt-3 text-sm leading-6 text-muted-foreground">{zh ? '完成上方验证后，可把同一份证据交给 GenLayer 判断。提交时需要用钱包确认并支付 Bradbury 测试币；查看网页和已有结果不需要连接钱包。' : 'After the check above, the same evidence can be submitted to GenLayer. A wallet and Bradbury test tokens are required to submit; browsing the site and reading existing results do not require a wallet.'}</p>}
+              <p className="section-label">{zh ? '链上记录与收入凭证' : 'Onchain record and revenue credential'}</p>
+              <h2 className="mt-2 text-xl font-semibold tracking-tight">{zh ? '这次判断已经写入 GenLayer 合约' : 'This judgment is stored in the GenLayer contract'}</h2>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">{zh ? '上方是 GenLayer 给出的最终结论；这里保留报告编号、合约地址和交易记录。符合条件时，被验证地址的主人可以在最下方领取链上收入凭证。' : 'The final GenLayer verdict appears above. This section keeps the report ID, contract address, and transaction record. When eligible, the owner of the assessed address can claim an onchain revenue credential below.'}</p>
             </div>
-            <Badge variant="outline" className={`w-fit ${hasDeployedContract ? 'border-emerald-300/25 bg-emerald-300/8 text-emerald-200' : 'border-amber-300/25 bg-amber-300/8 text-amber-200'}`}>{hasDeployedContract ? (zh ? 'Bradbury 已部署' : 'Deployed on Bradbury') : (zh ? '合约尚未部署' : 'Contract not deployed')}</Badge>
+            <Badge variant="outline" className="w-fit border-emerald-300/25 bg-emerald-300/8 text-emerald-200">{zh ? 'GenLayer 判断完成' : 'GenLayer judgment complete'}</Badge>
           </div>
-          {!hasDeployedContract && genLayerPreview?.reasons?.length > 0 && <div className="mt-5 grid gap-3 sm:grid-cols-2">{genLayerPreview.reasons.map((reason: any) => <div key={reason.code} className="rounded-xl border border-white/8 bg-black/15 p-4"><p className="text-xs font-medium text-violet-200">{labelPreviewReason(reason.code, zh)}</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{previewReasonDetail(reason, zh)}</p></div>)}</div>}
-          {!hasDeployedContract && <p className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/7 p-3 text-xs leading-5 text-amber-100/80">{zh ? '用于预览最终产品的效果。' : 'A preview of the final product experience.'}</p>}
           <div className="mt-5 rounded-xl border border-white/8 bg-black/20 p-4">
             <p className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{zh ? '报告编号' : 'Report ID'}</p>
             <p className="mt-2 break-all font-mono text-xs text-white">{reportId}</p>
           </div>
-          {hasDeployedContract && <div className="mt-3 rounded-xl border border-emerald-300/15 bg-emerald-300/5 p-4">
+          <div className="mt-3 rounded-xl border border-emerald-300/15 bg-emerald-300/5 p-4">
             <p className="text-[10px] uppercase tracking-[0.16em] text-emerald-200/75">{zh ? '合约地址' : 'Contract address'}</p>
             <p className="mt-2 break-all font-mono text-xs text-white">{contractAddress}</p>
             <a className="mt-3 inline-flex items-center gap-1.5 text-xs text-emerald-300 hover:text-emerald-200" href={contractExplorerUrl} target="_blank" rel="noreferrer">{zh ? '在 GenLayer 浏览器查看' : 'View in GenLayer Explorer'} <ExternalLink className="size-3" /></a>
-          </div>}
-          {!hasDeployedContract && <div className="mt-4 rounded-xl border border-violet-300/15 bg-violet-300/5 p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Button type="button" onClick={deployToGenLayer} disabled={['connecting', 'submitting', 'waiting'].includes(deployStatus)} className="w-fit bg-violet-200 text-violet-950 hover:bg-violet-100">
-                {deployStatus === 'connecting' ? (zh ? '正在连接钱包…' : 'Connecting wallet…') : deployStatus === 'submitting' ? (zh ? '等待钱包确认部署…' : 'Confirm deployment in wallet…') : deployStatus === 'waiting' ? (zh ? '等待合约最终确认…' : 'Waiting for finalization…') : deployStatus === 'done' ? (zh ? '合约部署完成' : 'Contract deployed') : (zh ? '用钱包部署到 Bradbury' : 'Deploy to Bradbury with wallet')}
-              </Button>
-              <p className="text-xs leading-5 text-muted-foreground">{zh ? '点击后会加载已经检查过的合约代码，并由你选择的钱包亲自确认 Bradbury 测试网交易。只会使用测试币，网站不会读取私钥。' : 'This loads the checked contract source and asks you to confirm the Bradbury testnet transaction in your selected wallet. It uses test tokens only and never reads your private key.'}</p>
-            </div>
-            {deployTxHash && <p className="mt-3 break-all font-mono text-[10px] text-violet-200">{zh ? '部署交易编号：' : 'Deployment transaction: '}{deployTxHash}</p>}
-            {deployError && <p role="alert" className="mt-3 rounded-xl border border-red-300/20 bg-red-300/8 p-3 text-xs leading-5 text-red-200">{deployError}</p>}
-          </div>}
-          {hasDeployedContract && <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-            <Button type="button" onClick={submitToGenLayer} disabled={!evidenceJson || checkingLinkage || ['connecting', 'submitting', 'waiting'].includes(chainStatus)} className="w-fit bg-violet-200 text-violet-950 hover:bg-violet-100">
-              {checkingLinkage ? (zh ? '等待完整钱包检查…' : 'Waiting for complete wallet check…') : chainStatus === 'connecting' ? (zh ? '正在连接钱包…' : 'Connecting wallet…') : chainStatus === 'submitting' ? (zh ? '等待钱包确认…' : 'Confirm in wallet…') : chainStatus === 'waiting' ? (zh ? '等待 GenLayer 共识…' : 'Waiting for GenLayer consensus…') : chainStatus === 'done' ? (zh ? 'GenLayer 判断完成' : 'GenLayer judgment complete') : (zh ? '提交给 GenLayer 判断' : 'Submit for GenLayer judgment')}
-            </Button>
-            <p className="text-xs leading-5 text-muted-foreground">{zh ? '点击后会切换到 Bradbury，并由你选择的钱包亲自确认交易。连接只读取公开地址；网站不会读取助记词或私钥，也不会发起代币无限授权。' : 'This switches to Bradbury and asks you to confirm in your selected wallet. Connecting only reads the public address; the site never accesses seed phrases or private keys and never requests unlimited token approval.'}</p>
-          </div>}
-          {chainTxHash && <a className="mt-3 inline-flex break-all font-mono text-[10px] text-violet-200 hover:text-violet-100" href={`${bradburyExplorerUrl}tx/${chainTxHash}`} target="_blank" rel="noreferrer">{zh ? '交易编号：' : 'Transaction: '}{chainTxHash}</a>}
-          {chainStatus === 'done' && <p className="mt-3 rounded-xl border border-emerald-300/20 bg-emerald-300/7 p-3 text-xs text-emerald-100">{zh ? '判断已写入合约，最终确认正在后台继续。' : 'The judgment is stored in the contract while final settlement continues in the background.'}</p>}
+          </div>
+          {chainTxHash && <a className="mt-3 inline-flex break-all font-mono text-[10px] text-violet-200 hover:text-violet-100" href={`${genLayerExplorerUrl}tx/${chainTxHash}`} target="_blank" rel="noreferrer">{zh ? '交易编号：' : 'Transaction: '}{chainTxHash}</a>}
           {chainNotice && <p className="mt-3 rounded-xl border border-sky-300/20 bg-sky-300/7 p-3 text-xs leading-5 text-sky-100">{chainNotice}</p>}
-          {chainJudgment && <div className={`mt-4 rounded-xl border p-5 ${chainTone.panel}`}>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div><p className={`section-label ${chainTone.text}`}>{zh ? 'GenLayer 给出的答案' : 'GenLayer answer'}</p><h3 className={`mt-2 text-xl font-semibold ${chainTone.text}`}>{labelChainVerdict(chainJudgment.verdict, payments, chainReasonCodes, zh)}</h3></div>
-              <Badge variant="outline" className={chainTone.badge}>{chainJudgment.policy_version ?? 'agent-income-v1'}</Badge>
+          {hasCredentialRegistry && chainJudgment && <section className="credential-panel mt-4 p-5 sm:p-6">
+            <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+              <div className="max-w-2xl">
+                <div className="flex items-center gap-2"><Fingerprint className="size-5 text-emerald-300" /><p className="section-label text-emerald-200">{zh ? 'ProofRabbit 链上收入凭证' : 'ProofRabbit Revenue Attestation'}</p></div>
+                <h3 className="mt-2 text-xl font-semibold">{credential ? (zh ? '这份凭证已经绑定到 Agent 钱包' : 'This credential is bound to the agent wallet') : credentialEligible ? (zh ? '这份判断可以领取为链上凭证' : 'This judgment is eligible for an onchain credential') : (zh ? '这份判断不会签发正面收入凭证' : 'This judgment does not qualify for a positive revenue credential')}</h3>
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">{credential ? (zh ? '凭证不能转让。任何人都可以直接用钱包地址从 GenLayer 合约核验，不需要相信网站截图。' : 'The credential is non-transferable. Anyone can verify it from the GenLayer contract using the wallet address instead of trusting a screenshot.') : credentialEligible ? (zh ? '只有上方被验证的钱包本人可以领取。钱包确认会证明地址归属，不会要求代币授权。' : 'Only the assessed wallet can claim it. The wallet transaction proves address control and never requests a token approval.') : (zh ? '公开判断仍然保留在链上，但高风险、证据不足或没有通过可信度门槛的报告不能包装成正面证明。' : 'The public judgment remains onchain, but a high-risk or insufficient report cannot be packaged as a positive credential.')}</p>
+              </div>
+              {credential ? <Badge variant="outline" className={credentialStatusClass(credential.status)}><BadgeCheck /> {labelCredentialStatus(credential.status, zh)}</Badge> : credentialEligible ? <Button type="button" onClick={claimRevenueCredential} disabled={['connecting', 'submitting', 'waiting'].includes(claimStatus)} className="w-fit bg-emerald-200 text-emerald-950 hover:bg-emerald-100">{claimStatus === 'connecting' ? (zh ? '正在检查钱包…' : 'Checking wallet…') : claimStatus === 'submitting' ? (zh ? '等待钱包确认…' : 'Confirm in wallet…') : claimStatus === 'waiting' ? (zh ? '正在签发凭证…' : 'Issuing credential…') : (zh ? '领取链上收入凭证' : 'Claim revenue credential')}</Button> : null}
             </div>
-            <p className="mt-4 max-w-4xl text-sm leading-7 text-white/85">{chainJudgmentSummary(chainJudgment, payments, indicators, Boolean(linkage), integrity, zh)}</p>
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <Metric label={zh ? '收入可信度' : 'Income credibility'} value={formatScore(chainJudgment.income_credibility, zh)} valueClassName={positiveScoreClass(chainJudgment.income_credibility)} />
-              <Metric label={zh ? '欺诈风险' : 'Fraud risk'} value={formatScore(chainJudgment.self_payment_risk, zh)} valueClassName={riskScoreClass(chainJudgment.self_payment_risk)} />
-              <Metric label={zh ? '证据充分程度' : 'Evidence sufficiency'} value={formatScore(chainJudgment.evidence_sufficiency, zh)} valueClassName={positiveScoreClass(chainJudgment.evidence_sufficiency)} />
-            </div>
-            {chainPoints.length > 0 && <div className="mt-5"><p className="text-xs font-medium text-white/80">{zh ? '这个答案是怎么得出的' : 'How this answer was reached'}</p><div className="mt-3 grid gap-2 lg:grid-cols-3">{chainPoints.map((point) => <div key={point.title} className="rounded-lg border border-white/8 bg-black/15 p-4"><p className="text-xs font-medium text-white/90">{point.title}</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{point.detail}</p></div>)}</div></div>}
-            {Array.isArray(chainJudgment.cited_wallets) && chainJudgment.cited_wallets.length > 0 && <details className="mt-4 rounded-lg border border-white/8 bg-black/10 p-3"><summary className="cursor-pointer text-xs text-muted-foreground">{zh ? '查看本次判断使用的钱包地址' : 'View wallet addresses used in this answer'}</summary><div className="mt-3">{chainJudgment.cited_wallets.map((address: string) => <p key={address} className="mt-1 break-all font-mono text-[10px] text-white/80">{address}</p>)}</div></details>}
-          </div>}
+            {credential && <div className="mt-5 grid gap-3 md:grid-cols-2">
+              <CredentialRow label={zh ? '凭证编号' : 'Credential ID'} value={credential.credential_id ?? '—'} />
+              <CredentialRow label={zh ? '绑定钱包' : 'Bound wallet'} value={credential.subject_wallet ?? checkedWallet} />
+              <CredentialRow label={zh ? '签发时间' : 'Issued'} value={formatCredentialDate(credential.issued_at, language)} />
+              <CredentialRow label={zh ? '有效期至' : 'Valid until'} value={formatCredentialDate(credential.valid_until, language)} />
+            </div>}
+            {credential && <div className="mt-4 flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={copyCredentialLink} className="border-emerald-300/20 bg-emerald-300/5 text-emerald-100 hover:bg-emerald-300/10"><Copy />{zh ? '复制公开核验链接' : 'Copy public verification link'}</Button><a className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 px-4 text-sm text-white hover:bg-white/5" href={`/proof/${checkedWallet}`}>{zh ? '打开链上凭证' : 'Open onchain credential'}<ExternalLink className="size-4" /></a></div>}
+            {claimTxHash && <a className="mt-3 inline-flex break-all font-mono text-[10px] text-emerald-200 hover:text-emerald-100" href={`${genLayerExplorerUrl}tx/${claimTxHash}`} target="_blank" rel="noreferrer">{zh ? '凭证交易：' : 'Credential transaction: '}{claimTxHash}</a>}
+            {claimError && <p role="alert" className="mt-3 rounded-xl border border-red-300/20 bg-red-300/8 p-3 text-xs leading-5 text-red-200">{claimError}</p>}
+            {copyNotice && <p className="mt-3 break-all text-xs text-emerald-200">{copyNotice}</p>}
+          </section>}
           {chainError && <p role="alert" className="mt-3 rounded-xl border border-red-300/20 bg-red-300/8 p-3 text-xs leading-5 text-red-200">{chainError}</p>}
           {evidenceJson && <details className="mt-3 rounded-xl border border-white/8 bg-black/15 p-4">
-            <summary className="cursor-pointer text-xs font-medium text-violet-200">{zh ? '查看将提交给合约的完整证据' : 'Inspect exact contract evidence'}</summary>
+            <summary className="cursor-pointer text-xs font-medium text-violet-200">{zh ? '查看本次链上判断使用的完整证据' : 'Inspect the exact evidence used by this onchain judgment'}</summary>
             <pre className="mt-4 max-h-72 overflow-auto whitespace-pre-wrap break-all text-[10px] leading-5 text-muted-foreground">{publicEvidenceJson(evidenceJson)}</pre>
           </details>}
         </section>
-        </>}
+        </></div>}
       </section>
     </main>
   );
@@ -613,6 +922,35 @@ export default function Home() {
 function Metric({ label, value, valueClassName = 'text-white' }: { label: string; value: string; valueClassName?: string }) { return <div className="metric"><p>{label}</p><strong className={valueClassName}>{value}</strong></div>; }
 function Reason({ icon, title, detail }: { icon: React.ReactNode; title: string; detail: string }) { return <div className="reason"><span>{icon}</span><div><h3>{title}</h3><p>{detail}</p></div></div>; }
 function Row({ label, value }: { label: string; value: string }) { return <div className="flex items-center justify-between gap-4"><dt className="text-muted-foreground">{label}</dt><dd className="font-mono text-white">{value}</dd></div>; }
+function CredentialRow({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-white/8 bg-black/15 p-4"><p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{label}</p><p className="mt-2 break-all font-mono text-xs text-white">{value}</p></div>; }
+
+function ChainJudgmentPanel({ judgment, payments, indicators, walletLinksChecked, integrity, reasonCodes, points, zh }: { judgment: any; payments: any; indicators: string[]; walletLinksChecked: boolean; integrity: any; reasonCodes: string[]; points: Array<{ title: string; detail: string }>; zh: boolean }) {
+  const tone = chainVerdictTone(judgment?.risk_profile, judgment?.verdict);
+  const generated = judgment?.analysis;
+  const generatedHeadline = zh ? generated?.headline_zh : generated?.headline_en;
+  const generatedSummary = zh ? generated?.summary_zh : generated?.summary_en;
+  const generatedPoints = Array.isArray(generated?.findings)
+    ? generated.findings.map((finding: any) => ({
+        title: zh ? finding.title_zh : finding.title_en,
+        detail: zh ? finding.detail_zh : finding.detail_en,
+      })).filter((finding: any) => finding.title && finding.detail)
+    : [];
+  const visiblePoints = generatedPoints.length ? generatedPoints : points;
+  return <section className={`mb-4 rounded-2xl border p-6 shadow-2xl shadow-black/25 sm:p-7 ${tone.panel}`}>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div><p className={`section-label ${tone.text}`}>{zh ? 'GenLayer 给出的链上判断' : 'GenLayer onchain judgment'}</p><h2 className={`mt-2 text-2xl font-semibold ${tone.text}`}>{generatedHeadline || labelChainVerdict(judgment.verdict, payments, reasonCodes, zh)}</h2></div>
+      <Badge variant="outline" className={tone.badge}>{judgment.policy_version ?? currentPolicyVersion}</Badge>
+    </div>
+    <p className="mt-4 max-w-4xl text-sm leading-7 text-white/85">{generatedSummary || chainJudgmentSummary(judgment, payments, indicators, walletLinksChecked, integrity, zh)}</p>
+    <div className="mt-5 grid gap-3 sm:grid-cols-3">
+      <Metric label={zh ? '收入可信度' : 'Income credibility'} value={formatScore(judgment.income_credibility, zh)} valueClassName={positiveScoreClass(judgment.income_credibility)} />
+      <Metric label={zh ? '欺诈风险' : 'Fraud risk'} value={formatScore(judgment.self_payment_risk, zh)} valueClassName={riskScoreClass(judgment.self_payment_risk)} />
+      <Metric label={zh ? '证据充分程度' : 'Evidence sufficiency'} value={formatScore(judgment.evidence_sufficiency, zh)} valueClassName={positiveScoreClass(judgment.evidence_sufficiency)} />
+    </div>
+    {visiblePoints.length > 0 && <div className="mt-5"><p className="text-xs font-medium text-white/80">{zh ? '为什么会得出这个结果' : 'Why this result was reached'}</p><div className="mt-3 grid gap-2 lg:grid-cols-3">{visiblePoints.map((point: any) => <div key={point.title} className="rounded-lg border border-white/8 bg-black/15 p-4"><p className="text-xs font-medium text-white/90">{point.title}</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{point.detail}</p></div>)}</div></div>}
+    {Array.isArray(judgment.cited_wallets) && judgment.cited_wallets.length > 0 && <details className="mt-4 rounded-lg border border-white/8 bg-black/10 p-3"><summary className="cursor-pointer text-xs text-muted-foreground">{zh ? '查看本次判断使用的钱包地址' : 'View wallet addresses used in this answer'}</summary><div className="mt-3">{judgment.cited_wallets.map((address: string) => <p key={address} className="mt-1 break-all font-mono text-[10px] text-white/80">{address}</p>)}</div></details>}
+  </section>;
+}
 
 function positiveScoreClass(value: number | null | undefined) {
   if (value == null) return 'text-white';
@@ -632,6 +970,10 @@ function shortAddress(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
+function pendingTransactionStorageKey(contractAddress: string, reportId: string) {
+  return `${pendingTransactionStoragePrefix}:${contractAddress.toLowerCase()}:${reportId}`;
+}
+
 async function readStoredJudgment(client: any, address: string, id: string, transactionHashVariant: any) {
   try {
     const stored = await client.readContract({
@@ -648,13 +990,63 @@ async function readStoredJudgment(client: any, address: string, id: string, tran
   }
 }
 
+async function readStoredCredential(client: any, address: string, subjectWallet: string, transactionHashVariant: any) {
+  try {
+    const stored = await client.readContract({
+      address: address as `0x${string}`,
+      functionName: 'get_credential',
+      args: [subjectWallet],
+      transactionHashVariant: transactionHashVariant.LATEST_NONFINAL,
+    });
+    if (!stored) return null;
+    return typeof stored === 'string' ? JSON.parse(stored) : stored;
+  } catch (caught) {
+    const text = genLayerErrorSearchText(caught);
+    if (/credential not found|function.*not found|unknown function/i.test(text)) return null;
+    throw caught;
+  }
+}
+
+function isCredentialEligible(judgment: any) {
+  return Boolean(judgment) &&
+    (judgment.risk_profile === 'no_fraud_signals' || (!judgment.risk_profile && judgment.verdict === 'no_wash_evidence')) &&
+    Number(judgment.income_credibility ?? 0) >= 70 &&
+    Number(judgment.self_payment_risk ?? 100) <= 30 &&
+    Number(judgment.evidence_sufficiency ?? 0) >= 70;
+}
+
+function labelCredentialStatus(status: string | undefined, zh: boolean) {
+  const labels: Record<string, [string, string]> = {
+    active: ['有效', 'Active'],
+    expired: ['已过期', 'Expired'],
+    revoked: ['已撤销', 'Revoked'],
+    superseded: ['已被新版替代', 'Superseded'],
+  };
+  return labels[status ?? '']?.[zh ? 0 : 1] ?? (zh ? '状态未知' : 'Unknown');
+}
+
+function credentialStatusClass(status: string | undefined) {
+  if (status === 'active') return 'border-emerald-300/25 bg-emerald-300/8 text-emerald-200';
+  if (status === 'expired' || status === 'superseded') return 'border-amber-300/25 bg-amber-300/8 text-amber-200';
+  return 'border-red-300/25 bg-red-300/8 text-red-200';
+}
+
+function formatCredentialDate(value: number | string | undefined, language: 'zh' | 'en') {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+  return new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en-US', {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(new Date(seconds * 1000));
+}
+
 function genLayerErrorSearchText(caught: unknown) {
   const error = caught as {
     message?: unknown;
     details?: unknown;
+    shortMessage?: unknown;
     cause?: { message?: unknown; data?: unknown };
   } | null;
-  const parts = [error?.message, error?.details, error?.cause?.message].filter((value): value is string => typeof value === 'string');
+  const parts = [error?.message, error?.details, error?.shortMessage, error?.cause?.message].filter((value): value is string => typeof value === 'string');
   const data = error?.cause?.data;
   if (typeof data === 'string' && /^[0-9a-fA-F]+$/.test(data) && data.length % 2 === 0) {
     try {
@@ -665,58 +1057,20 @@ function genLayerErrorSearchText(caught: unknown) {
       // cannot be decoded by this browser.
     }
   }
-  return parts.join(' ');
-}
-
-async function waitForSuccessfulDeployment(client: any, hash: `0x${string}`) {
-  // A newly broadcast Bradbury transaction can briefly exist before the
-  // consensus-data contract exposes getTransactionAllData. Treat that as a
-  // normal indexing delay and keep polling instead of reporting a false
-  // deployment failure.
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    let transaction: any;
+  const receiptResult = typeof data === 'object' && data !== null && 'receipt' in data
+    ? (data as { receipt?: { result?: unknown } }).receipt?.result
+    : null;
+  if (typeof receiptResult === 'string') {
     try {
-      transaction = await client.getTransaction({ hash });
+      const decoded = /^[0-9a-fA-F]+$/.test(receiptResult) && receiptResult.length % 2 === 0
+        ? new TextDecoder().decode(new Uint8Array(receiptResult.match(/.{2}/g)?.map((byte) => Number.parseInt(byte, 16)) ?? []))
+        : atob(receiptResult);
+      parts.push(decoded.replace(/[\x00-\x1f]/g, ' ').trim());
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-      continue;
+      parts.push(receiptResult);
     }
-    const status = transaction?.statusName;
-    const execution = transaction?.txExecutionResultName;
-    if (['ACCEPTED', 'READY_TO_FINALIZE', 'FINALIZED'].includes(status) && execution === 'FINISHED_WITH_RETURN') return transaction;
-    if (status === 'CANCELED' || execution === 'FINISHED_WITH_ERROR') {
-      throw new Error(`Contract deployment execution failed: ${execution || status}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
-  throw new Error('Contract deployment is still processing. Inspect the transaction before retrying.');
-}
-
-async function waitForSuccessfulGenLayerResult(client: any, hash: `0x${string}`) {
-  // genlayer-js treats timeout/undetermined states as "decided" when waiting
-  // for ACCEPTED. Bradbury can automatically appeal those rounds and later
-  // accept the same transaction, so keep following the transaction instead of
-  // showing a false failure after the first timed-out leader.
-  let undeterminedPolls = 0;
-  for (let attempt = 0; attempt < 180; attempt += 1) {
-    const transaction = await client.getTransaction({ hash });
-    const status = transaction?.statusName;
-    const execution = transaction?.txExecutionResultName;
-    if (['ACCEPTED', 'READY_TO_FINALIZE', 'FINALIZED'].includes(status) && execution === 'FINISHED_WITH_RETURN') return transaction;
-    if (status === 'CANCELED' || execution === 'FINISHED_WITH_ERROR') {
-      throw new Error(`GenLayer transaction execution failed: ${execution || status}`);
-    }
-    if (status === 'UNDETERMINED') {
-      undeterminedPolls += 1;
-      if (undeterminedPolls >= 6) {
-        throw new Error('GenLayer validators did not reach agreement: UNDETERMINED');
-      }
-    } else {
-      undeterminedPolls = 0;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
-  }
-  throw new Error('GenLayer consensus is still processing. Inspect the transaction before retrying.');
+  return parts.join(' ');
 }
 
 function inferWalletName(provider: InjectedProvider) {
@@ -749,7 +1103,7 @@ function describeChainError(caught: unknown, wasSubmitted: boolean, zh: boolean)
   if (/already judged/i.test(message)) {
     return zh ? '这份报告已经判断过，不需要重复付费提交。' : 'This report has already been judged and does not need another paid submission.';
   }
-  if (/LEGACY_CONTRACT/i.test(message)) {
+  if (/LEGACY_CONTRACT|CREDENTIAL_UPGRADE_REQUIRED/i.test(message)) {
     return zh ? '当前连接的是旧版合约。为避免旧规则继续产生不稳定结果，网页已停止发送交易；请刷新页面并部署新版合约。' : 'The connected contract is outdated. The site stopped before sending a transaction; refresh and deploy the current contract version.';
   }
   if (/NOT_VOTED/i.test(message)) {
@@ -757,6 +1111,12 @@ function describeChainError(caught: unknown, wasSubmitted: boolean, zh: boolean)
   }
   if (/UNDETERMINED|did not reach agreement/i.test(message)) {
     return zh ? '本次验证流程已经结束，但验证者没有达成一致，因此没有产生正式判断。请先查看交易详情，不要立即重复提交。' : 'This validation round ended without validator agreement, so no formal judgment was produced. Inspect the transaction before retrying.';
+  }
+  if (/NO_CONSENSUS_RESULT/i.test(message)) {
+    return zh ? '这笔交易已经结束，但 GenLayer 没有形成可写入合约的最终分析。该报告没有生成结果，也不会被当成有效判断。' : 'The transaction ended without a final GenLayer analysis that could be stored. No valid judgment was created for this report.';
+  }
+  if (/CONSENSUS_TAKING_LONG/i.test(message)) {
+    return zh ? 'GenLayer 已处理超过 12 分钟，网页已停止一直等待，但原交易仍可能在测试网上继续。刷新后会继续跟踪同一笔交易，不会自动重复提交。' : 'GenLayer has been processing for more than 12 minutes. The page stopped waiting, but the original testnet transaction may continue. Refreshing will resume the same transaction instead of submitting a duplicate.';
   }
   if (!wasSubmitted && /network|rpc|fetch|timeout|switch|chain/i.test(message)) {
     return zh ? '钱包或测试网连接暂时中断；交易没有发到链上，也不会扣测试币。请稍后重试。' : 'The wallet or testnet connection was interrupted. Nothing was sent onchain and no test tokens were charged. Please retry.';
@@ -767,9 +1127,9 @@ function describeChainError(caught: unknown, wasSubmitted: boolean, zh: boolean)
   return zh ? `交易已经发到链上，但执行没有完成。请先用上方交易编号查看详情，不要立即重复提交。${message}` : `The transaction was submitted but did not finish. Inspect the transaction above before retrying. ${message}`;
 }
 
-function chainVerdictTone(verdict?: string) {
-  if (verdict === 'wash_trading' || verdict === 'high_risk') return { panel: 'border-red-300/25 bg-red-300/6', text: 'text-red-300', badge: 'border-red-300/25 text-red-200' };
-  if (verdict === 'mixed' || verdict === 'insufficient_evidence') return { panel: 'border-amber-300/25 bg-amber-300/6', text: 'text-amber-300', badge: 'border-amber-300/25 text-amber-200' };
+function chainVerdictTone(riskProfile?: string, verdict?: string) {
+  if (riskProfile === 'fraud_detected' || verdict === 'wash_trading' || verdict === 'high_risk') return { panel: 'border-red-300/25 bg-red-300/6', text: 'text-red-300', badge: 'border-red-300/25 text-red-200' };
+  if (riskProfile === 'risk_factors' || riskProfile === 'no_payment_history' || verdict === 'mixed' || verdict === 'insufficient_evidence') return { panel: 'border-amber-300/25 bg-amber-300/6', text: 'text-amber-300', badge: 'border-amber-300/25 text-amber-200' };
   return { panel: 'border-emerald-300/20 bg-emerald-300/5', text: 'text-emerald-300', badge: 'border-emerald-300/25 text-emerald-200' };
 }
 
