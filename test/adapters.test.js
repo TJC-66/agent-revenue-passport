@@ -132,6 +132,24 @@ test("continues AntSeed event reads from the durable ledger cursor", async () =>
   assert.equal(inspectedFilter.toBlock, "0xfa");
 });
 
+test("uses the durable ledger cursor for Blockscout incremental reads", async () => {
+  const seller = "0x000000000000000000000000000000000000dead";
+  let requestedUrl = "";
+  const payments = await readAntseedPaymentEvents(seller, { firstSettledBlock: 100, lastSettledBlock: 250 }, {
+    eventSource: "blockscout",
+    resumeFromBlock: 201,
+    blockscoutDelayMs: 0,
+    fetchJson: async (url) => {
+      requestedUrl = url;
+      return { status: "0", message: "No logs found", result: [] };
+    },
+  });
+  assert.match(requestedUrl, /fromBlock=201/);
+  assert.match(requestedUrl, /toBlock=250/);
+  assert.equal(payments.coverage.completeHistory, false);
+  assert.equal(payments.coverage.completeWindow, true);
+});
+
 test("verifies a Solana record on its declared chain", async () => {
   const result = await verifySolanaTransaction({ tx_hash: "sig", chain_id: "solana-devnet", solver: "solver" }, {
     rpcCall: async (url) => {
